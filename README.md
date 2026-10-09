@@ -8,6 +8,20 @@ PYTHONPATH=src python3 -m figuresradar discover
 
 Consulta páginas públicas de saldos da Nin-Nin-Game e da HobbyLink Japan, guarda histórico de preços em `data/runtime/price-history.sqlite3` e gera `data/runtime/latest-deals.json`. O diretório runtime está ignorado pelo Git. A saída inclui score, qualidade, stock, URL e motivo do score. Este comando não consulta nem escreve no Buffer; `DRY_RUN=true` e `BUFFER_WRITE_ENABLED=false` continuam os valores por defeito. As [fontes, limites e fórmula](docs/discovery.md) estão documentados em separado.
 
+### Observação periódica local
+
+O timer de utilizador em `ops/figuresradar-discover.timer` agenda a descoberta às 00:00, 06:00, 12:00 e 18:00 (hora local), com atraso aleatório até 20 minutos. O serviço usa `/usr/bin/python3`, `PYTHONPATH=src` absoluto e força as flags de publicação desativadas. A instalação na máquina persistente é:
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -s /home/diogo/Downloads/dark-style-lab/figuresradar-repo/ops/figuresradar-discover.service ~/.config/systemd/user/figuresradar-discover.service
+ln -s /home/diogo/Downloads/dark-style-lab/figuresradar-repo/ops/figuresradar-discover.timer ~/.config/systemd/user/figuresradar-discover.timer
+systemctl --user daemon-reload
+systemctl --user enable --now figuresradar-discover.timer
+```
+
+`PYTHONPATH=src python3 -m figuresradar history-status` mostra o estado da DB. `history-status --changes` mostra as mudanças da última recolha; `discover --changes` também as mostra. O lock `data/runtime/discover.lock` salta uma segunda execução sem interromper a primeira. `discovery_runs` e `discovery_run_sources` guardam o resultado e erro resumido por fonte. Uma migração do esquema atual cria antes `price-history.sqlite3.backup-<timestamp>` por meio da API de backup SQLite. A DB, backups, lock e JSON continuam fora do Git. O histórico HIGH requer cinco observações anteriores, pelo menos sete dias até à observação atual e observações anteriores em quatro dias distintos.
+
 FiguresRadar prepara posts sobre promoções de anime figures para a conta X `@FiguresRadar`. O Buffer é o único responsável por escolher horários e publicar. **A CLI de prévia funciona apenas em `DRY_RUN=true`; a CLI de descoberta só lê lojas e grava dados locais. Nenhuma delas cria, edita ou apaga posts.**
 
 ## Configuração do Buffer

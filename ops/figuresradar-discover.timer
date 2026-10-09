@@ -1,0 +1,11 @@
+[Unit]
+Description=Observe FiguresRadar prices four times daily
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00
+RandomizedDelaySec=20min
+Persistent=true
+Unit=figuresradar-discover.service
+
+[Install]
+WantedBy=timers.target

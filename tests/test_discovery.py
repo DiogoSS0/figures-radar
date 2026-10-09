@@ -42,7 +42,9 @@ class DiscoveryTests(unittest.TestCase):
         self.assertLess(scored.deal_score, 70)
 
     def test_out_of_stock_and_bad_price_and_bad_url(self):
-        self.assertIsNone(normalize(product(stock_status="SOLD_OUT"), NOW))
+        unavailable = normalize(product(stock_status="SOLD_OUT"), NOW)
+        self.assertEqual(unavailable.stock_status, "OUT_OF_STOCK")
+        self.assertEqual(score_deal(unavailable, NOW).deal_score, 0)
         self.assertIsNone(normalize(product(current_price=Decimal("0")), NOW))
         self.assertIsNone(normalize(product(product_url="http://shop.example/figure"), NOW))
         self.assertIsNone(normalize(product(regular_price=Decimal("40")), NOW))
