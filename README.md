@@ -22,6 +22,16 @@ systemctl --user enable --now figuresradar-discover.timer
 
 `PYTHONPATH=src python3 -m figuresradar history-status` mostra o estado da DB. `history-status --changes` mostra as mudanças da última recolha; `discover --changes` também as mostra. O lock `data/runtime/discover.lock` salta uma segunda execução sem interromper a primeira. `discovery_runs` e `discovery_run_sources` guardam o resultado e erro resumido por fonte. Uma migração do esquema atual cria antes `price-history.sqlite3.backup-<timestamp>` por meio da API de backup SQLite. A DB, backups, lock e JSON continuam fora do Git. O histórico HIGH requer cinco observações anteriores, pelo menos sete dias até à observação atual e observações anteriores em quatro dias distintos.
 
+### Preparação de conteúdo sem publicação
+
+`DRY_RUN=true BUFFER_WRITE_ENABLED=false PYTHONPATH=src python3 -m figuresradar prepare-posts` lê a fila real do canal FiguresRadar no Buffer e prepara apenas os deals do snapshot `data/runtime/latest-deals.json` com score ≥70, stock disponível e observação recente. Não chama a mutação de escrita. Para a consulta real da fila, fornecer `BUFFER_API_KEY` no ambiente; os IDs não secretos ficam em `config/buffer-target.json` e o canal é validado pela API.
+
+Os resultados ficam em `data/runtime/prepared-posts/run-*/post-*/`, com `metadata.json`, `copy.txt` e `card.jpg` 1200×675. `PYTHONPATH=src python3 -m figuresradar review-posts` apresenta copy, URL, score e caminho do card; cada execução gera também `review.html`. As imagens são descarregadas dos hosts autorizados das lojas, validadas e guardadas em `data/runtime/assets/`, fora do Git. O card usa a imagem real do produto, sem geração AI.
+
+As reservas dry run ficam em `data/runtime/preparation.sqlite3`, separadas do ledger de publicações. Impedem que uma nova preparação local repita a mesma oferta, mas aceitam uma descida material de pelo menos 5%. `prepare-posts --clear-test-reservations` remove apenas reservas locais `RESERVED`/`FAILED` para testes; não altera o ledger real nem apaga cards anteriores. Publicação continua desativada.
+
+`NEKOPRICE_BASE_URL` está reservado para o futuro funil. Só `NEKOPRICE_CTA_URL`, quando explicitamente configurada com uma URL HTTPS existente, altera o destino da copy; por defeito, a copy liga à página da loja. Não se inventa `/deal/<id>`. Como os cards são locais e o Buffer exige uma imagem HTTPS pública, `buffer_payload` fica `null` e `buffer_payload_draft` regista `mode=addToQueue`, texto, canal e caminho local do card com estado `AWAITING_PUBLIC_CARD_URL`. Um URL público real e revalidação de preço/stock serão necessários antes de qualquer futura escrita. As descrições de personagem só são usadas se tiverem fonte HTTPS e confiança `HIGH`; sem dados fiáveis, são omitidas.
+
 FiguresRadar prepara posts sobre promoções de anime figures para a conta X `@FiguresRadar`. O Buffer é o único responsável por escolher horários e publicar. **A CLI de prévia funciona apenas em `DRY_RUN=true`; a CLI de descoberta só lê lojas e grava dados locais. Nenhuma delas cria, edita ou apaga posts.**
 
 ## Configuração do Buffer

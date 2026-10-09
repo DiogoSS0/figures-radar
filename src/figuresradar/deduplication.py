@@ -12,11 +12,15 @@ MIN_MATERIAL_DROP = Decimal("0.05")
 
 
 def product_identity(deal: Deal) -> str:
-    parsed = urlsplit(deal.product_url)
+    return product_key_for(deal.retailer, deal.product_url)
+
+
+def product_key_for(retailer: str, product_url: str) -> str:
+    parsed = urlsplit(product_url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ValueError("Product URL must use HTTPS")
     canonical_url = urlunsplit(("https", parsed.netloc.lower(), parsed.path.rstrip("/"), "", ""))
-    return hashlib.sha256(json.dumps([deal.retailer.strip().casefold(), canonical_url]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([retailer.strip().casefold(), canonical_url]).encode()).hexdigest()
 
 
 def offer_identity(deal: Deal) -> str:
