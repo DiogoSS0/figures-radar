@@ -21,6 +21,14 @@ def main() -> int:
         from .history_status import main as status_main
         sys.argv.pop(1)
         return status_main()
+    if len(sys.argv) > 1 and sys.argv[1] == "prepare-posts":
+        from .content_workflow import main_prepare
+        sys.argv.pop(1)
+        return main_prepare()
+    if len(sys.argv) > 1 and sys.argv[1] == "review-posts":
+        from .content_workflow import main_review
+        sys.argv.pop(1)
+        return main_review()
     parser = argparse.ArgumentParser(description="Prepare FiguresRadar deals without publishing")
     parser.add_argument("--fixture", type=Path, default=None)
     parser.add_argument("--pending", type=int, default=None, help="Simulated Buffer count; test only")

@@ -60,9 +60,12 @@ class DealStore:
         self.conn.close()
 
     def prior_prices(self, deal: Deal) -> list[Decimal]:
+        return self.prior_prices_for_key(product_identity(deal), deal.currency)
+
+    def prior_prices_for_key(self, product_key: str, currency: str) -> list[Decimal]:
         rows = self.conn.execute(
             "SELECT current_price FROM posted_deals WHERE product_key=? AND currency=?",
-            (product_identity(deal), deal.currency.upper()),
+            (product_key, currency.upper()),
         ).fetchall()
         return [Decimal(row[0]) for row in rows]
 
