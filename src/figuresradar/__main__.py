@@ -17,6 +17,10 @@ def main() -> int:
         from .discovery import main as discover_main
         sys.argv.pop(1)
         return discover_main()
+    if len(sys.argv) > 1 and sys.argv[1] == "history-status":
+        from .history_status import main as status_main
+        sys.argv.pop(1)
+        return status_main()
     parser = argparse.ArgumentParser(description="Prepare FiguresRadar deals without publishing")
     parser.add_argument("--fixture", type=Path, default=None)
     parser.add_argument("--pending", type=int, default=None, help="Simulated Buffer count; test only")

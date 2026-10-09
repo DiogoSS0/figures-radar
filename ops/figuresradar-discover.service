@@ -1,0 +1,12 @@
+[Unit]
+Description=FiguresRadar local price discovery
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/diogo/Downloads/dark-style-lab/figuresradar-repo
+Environment=PYTHONPATH=/home/diogo/Downloads/dark-style-lab/figuresradar-repo/src
+Environment=DRY_RUN=true
+Environment=BUFFER_WRITE_ENABLED=false
+Environment=FIGURESRADAR_RUN_SOURCE=systemd_timer
+ExecStart=/usr/bin/python3 -m figuresradar discover
+TimeoutStartSec=30min

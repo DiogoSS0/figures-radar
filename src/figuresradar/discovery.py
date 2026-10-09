@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
+import os
 import re
 import sqlite3
+import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -28,10 +31,21 @@ CREATE TABLE IF NOT EXISTS discovery_products (
 );
 CREATE TABLE IF NOT EXISTS price_observations (
   product_identity TEXT NOT NULL, retailer TEXT NOT NULL, currency TEXT NOT NULL,
-  price TEXT NOT NULL, stock_status TEXT, observed_at TEXT NOT NULL,
+  price TEXT NOT NULL, stock_status TEXT, observed_at TEXT NOT NULL, regular_price TEXT,
   PRIMARY KEY(product_identity, retailer, currency, observed_at)
 );
 CREATE INDEX IF NOT EXISTS idx_observations_lookup ON price_observations(product_identity, retailer, currency, observed_at);
+CREATE TABLE IF NOT EXISTS discovery_runs (
+  id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, duration_seconds REAL,
+  source TEXT NOT NULL, products_discovered INTEGER NOT NULL DEFAULT 0,
+  products_normalized INTEGER NOT NULL DEFAULT 0, deals_70_plus INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL, error_summary TEXT
+);
+CREATE TABLE IF NOT EXISTS discovery_run_sources (
+  run_id INTEGER NOT NULL REFERENCES discovery_runs(id), retailer TEXT NOT NULL,
+  status TEXT NOT NULL, products INTEGER NOT NULL, error_summary TEXT,
+  PRIMARY KEY(run_id, retailer)
+);
 """
 
 
@@ -119,8 +133,8 @@ def normalize(raw: RawProduct, now: datetime | None = None) -> NormalizedProduct
     if regular is not None and (regular <= 0 or regular < price):
         return None
     status = (raw.stock_status or "UNKNOWN").upper()
-    if status in {"OUT_OF_STOCK", "SOLD_OUT", "DISCONTINUED"}:
-        return None
+    if status in {"SOLD_OUT", "DISCONTINUED"}:
+        status = "OUT_OF_STOCK"
     availability = status if status in {"IN_STOCK", "PREORDER", "BACKORDER"} else "UNKNOWN"
     discount = ((regular - price) / regular * 100).quantize(Decimal("0.01")) if regular else None
     image = raw.image_url if valid_https(raw.image_url) else None
@@ -140,8 +154,23 @@ def normalize(raw: RawProduct, now: datetime | None = None) -> NormalizedProduct
 class PriceHistory:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        self.path = path
+        self.connection = sqlite3.connect(path, timeout=30)
+        self.connection.execute("PRAGMA foreign_keys=ON")
+        old_table = self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='price_observations'").fetchone()
+        if old_table and "regular_price" not in {row[1] for row in self.connection.execute("PRAGMA table_info(price_observations)")}:
+            self.backup()
+            with self.connection:
+                self.connection.execute("ALTER TABLE price_observations ADD COLUMN regular_price TEXT")
         self.connection.executescript(SCHEMA)
+
+    def backup(self) -> Path:
+        """Create a consistent SQLite snapshot before a destructive schema change."""
+        stamp = utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+        target = self.path.with_name(f"{self.path.name}.backup-{stamp}")
+        with sqlite3.connect(target) as destination:
+            self.connection.backup(destination)
+        return target
 
     def close(self) -> None:
         self.connection.close()
@@ -163,14 +192,49 @@ class PriceHistory:
             first_observed_price=observations[0][0] if observations else product.current_price,
             historical_minimum=historical_min,
             median_7d=m7, median_30d=m30, median_90d=m90,
-            historical_confidence="HIGH" if len(observations) >= 5 and observations[-1][1] - observations[0][1] >= timedelta(days=7) else "LOW")
+            historical_confidence="HIGH" if (
+                len(observations) >= 5
+                and now - observations[0][1] >= timedelta(days=7)
+                and len({t.date() for _, t in observations}) >= 4
+            ) else "LOW")
         with self.connection:
             self.connection.execute(
                 "INSERT INTO discovery_products VALUES (?,?,?,?,?) ON CONFLICT(product_identity,retailer,currency) DO UPDATE SET last_seen_at=excluded.last_seen_at",
                 (*key, first[0] if first else now.isoformat(), now.isoformat()))
-            self.connection.execute("INSERT INTO price_observations VALUES (?,?,?,?,?,?)",
-                                    (*key, str(product.current_price), product.stock_status, now.isoformat()))
+            self.connection.execute(
+                "INSERT INTO price_observations (product_identity,retailer,currency,price,stock_status,observed_at,regular_price) VALUES (?,?,?,?,?,?,?)",
+                (*key, str(product.current_price), product.stock_status, now.isoformat(),
+                 str(product.regular_price) if product.regular_price is not None else None))
         return enriched
+
+    def previous_observation(self, product: NormalizedProduct) -> tuple | None:
+        return self.connection.execute(
+            "SELECT price,stock_status,regular_price FROM price_observations WHERE product_identity=? AND retailer=? AND currency=? ORDER BY observed_at DESC LIMIT 1",
+            (product.product_identity, product.retailer, product.currency)).fetchone()
+
+
+def changes_for(product: NormalizedProduct, previous: tuple | None) -> list[str]:
+    if previous is None:
+        return ["NEW_PRODUCT"]
+    old_price, old_stock, old_regular = previous
+    changes = []
+    if product.current_price < Decimal(old_price):
+        changes.append("PRICE_DOWN")
+    elif product.current_price > Decimal(old_price):
+        changes.append("PRICE_UP")
+    old_available = old_stock in {"IN_STOCK", "PREORDER", "BACKORDER"}
+    available = product.stock_status in {"IN_STOCK", "PREORDER", "BACKORDER"}
+    if available and not old_available:
+        changes.append("BACK_IN_STOCK")
+    elif old_available and not available:
+        changes.append("SOLD_OUT")
+    old_promo = old_regular is not None and Decimal(old_regular) > Decimal(old_price)
+    promo = product.regular_price is not None and product.regular_price > product.current_price
+    if promo and not old_promo:
+        changes.append("PROMOTION_APPEARED")
+    elif old_promo and not promo:
+        changes.append("PROMOTION_DISAPPEARED")
+    return changes
 
 
 def quality(score: int) -> str:
@@ -178,6 +242,8 @@ def quality(score: int) -> str:
 
 
 def score_deal(product: NormalizedProduct, now: datetime | None = None) -> NormalizedProduct:
+    if product.availability_type not in {"IN_STOCK", "PREORDER", "BACKORDER"}:
+        return replace(product, deal_score=0, deal_quality="IGNORE", score_reason="unavailable")
     now = now or utc_now()
     age_days = max(0.0, (now - product.first_seen_at).total_seconds() / 86400)
     freshness = max(0, round(10 * (1 - age_days / 30)))
@@ -226,9 +292,69 @@ def serialize(product: NormalizedProduct) -> dict:
 
 
 def run_discovery(root: Path, collectors: list[DealCollector] | None = None,
-                  *, now: datetime | None = None, verify_images: bool = True) -> dict:
+                  *, now: datetime | None = None, verify_images: bool = True,
+                  source: str = "manual") -> dict:
     now = now or utc_now()
+    runtime = root / "data" / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    with (runtime / "discover.lock").open("a+b") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            history = PriceHistory(runtime / "price-history.sqlite3")
+            try:
+                with history.connection:
+                    history.connection.execute(
+                        "INSERT INTO discovery_runs (started_at,finished_at,duration_seconds,source,status) VALUES (?,?,?,?,?)",
+                        (now.isoformat(), utc_now().isoformat(), 0, source, "SKIPPED_ALREADY_RUNNING"))
+            finally:
+                history.close()
+            return {"status": "SKIPPED_ALREADY_RUNNING", "buffer_writes": 0, "x_posts": 0}
+        try:
+            return _run_discovery_locked(root, collectors, now=now, verify_images=verify_images, source=source)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _run_discovery_locked(root: Path, collectors: list[DealCollector] | None,
+                          *, now: datetime, verify_images: bool, source: str) -> dict:
+    started_clock = time.monotonic()
     collectors = collectors if collectors is not None else [NinNinCollector(), HLJCollector()]
+    history = PriceHistory(root / "data" / "runtime" / "price-history.sqlite3")
+    with history.connection:
+        run_id = history.connection.execute(
+            "INSERT INTO discovery_runs (started_at,source,status) VALUES (?,?,?)",
+            (now.isoformat(), source, "RUNNING")).lastrowid
+    try:
+        result = _collect_and_record(root, history, collectors, now=now, verify_images=verify_images)
+        failed = [s for s in result["sources"] if s["status"] == "FAILED"]
+        status = "FAILED" if failed and len(failed) == len(result["sources"]) else "PARTIAL_FAILURE" if failed else "SUCCESS"
+        summary = "; ".join(f"{s['retailer']}: {s['error']}" for s in failed) or None
+        return result
+    except Exception as exc:
+        result = None
+        status = "FAILED"
+        summary = type(exc).__name__
+        raise
+    finally:
+        finished = utc_now()
+        with history.connection:
+            history.connection.execute(
+                "UPDATE discovery_runs SET finished_at=?,duration_seconds=?,products_discovered=?,products_normalized=?,deals_70_plus=?,status=?,error_summary=? WHERE id=?",
+                (finished.isoformat(), time.monotonic() - started_clock,
+                 result["products_discovered"] if result else 0,
+                 result["normalized"] if result else 0,
+                 result["deals_at_least_70"] if result else 0, status, summary, run_id))
+            if result:
+                for item in result["sources"]:
+                    history.connection.execute(
+                        "INSERT INTO discovery_run_sources VALUES (?,?,?,?,?)",
+                        (run_id, item["retailer"], item["status"], item["products"], item.get("error")))
+        history.close()
+
+
+def _collect_and_record(root: Path, history: PriceHistory, collectors: list[DealCollector],
+                        *, now: datetime, verify_images: bool) -> dict:
     raw_products: list[RawProduct] = []
     sources = []
     for collector in collectors:
@@ -252,11 +378,16 @@ def run_discovery(root: Path, collectors: list[DealCollector] | None = None,
             continue
         seen.add(key)
         normalized.append(item)
-    history = PriceHistory(root / "data" / "runtime" / "price-history.sqlite3")
-    try:
-        scored = [score_deal(history.enrich_and_record(item, now), now) for item in normalized]
-    finally:
-        history.close()
+    changes = []
+    scored = []
+    for item in normalized:
+        previous = history.previous_observation(item)
+        for change in changes_for(item, previous):
+            changes.append({"change": change, "product_identity": item.product_identity,
+                            "retailer": item.retailer, "currency": item.currency,
+                            "previous_price": previous[0] if previous else None,
+                            "current_price": str(item.current_price), "stock_status": item.stock_status})
+        scored.append(score_deal(history.enrich_and_record(item, now), now))
     scored.sort(key=lambda p: (-p.deal_score, p.retailer, p.figure_name))
     if verify_images:
         scored[:10] = [verify_image(item) for item in scored[:10]]
@@ -266,20 +397,28 @@ def run_discovery(root: Path, collectors: list[DealCollector] | None = None,
         "normalized": len(normalized),
         "in_stock_or_preorder": sum(p.availability_type in {"IN_STOCK", "PREORDER", "BACKORDER"} for p in normalized),
         "deals_at_least_70": sum(p.deal_score >= 70 for p in scored),
-        "deals": [serialize(p) for p in scored], "buffer_writes": 0, "x_posts": 0,
+        "deals": [serialize(p) for p in scored], "changes": changes,
+        "buffer_writes": 0, "x_posts": 0,
     }
     output = root / "data" / "runtime" / "latest-deals.json"
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = output.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(output)
     return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Discover figure deals without publishing")
     parser.add_argument("--no-image-check", action="store_true", help="Skip image HEAD checks")
+    parser.add_argument("--changes", action="store_true", help="Show changes since each product's previous observation")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    result = run_discovery(root, verify_images=not args.no_image_check)
+    result = run_discovery(root, verify_images=not args.no_image_check,
+                           source=os.environ.get("FIGURESRADAR_RUN_SOURCE", "manual"))
+    if result.get("status") == "SKIPPED_ALREADY_RUNNING":
+        print("SKIPPED_ALREADY_RUNNING")
+        return 0
     print(f"Sources queried: {result['sources_queried']}")
     for source in result["sources"]:
         print(f"  {source['retailer']}: {source['status']} ({source['products']})")
@@ -293,4 +432,6 @@ def main() -> int:
               f"{deal['discount_percent']}% | {deal['deal_score']} {deal['deal_quality']} | {deal['stock_status']} | "
               f"{deal['product_url']} | image {deal['image_status']} | {deal['score_reason']}")
     print("Buffer writes: 0 | X posts: 0")
+    if args.changes:
+        print(json.dumps(result["changes"], ensure_ascii=False, indent=2))
     return 0
