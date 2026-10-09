@@ -1,6 +1,14 @@
 # FiguresRadar
 
-FiguresRadar prepara posts sobre promoções de anime figures para a conta X `@FiguresRadar`. O Buffer é o único responsável por escolher horários e publicar. **Nesta fase, a CLI funciona apenas em `DRY_RUN=true`: não cria, edita nem apaga posts.**
+## Descoberta real (fase de leitura)
+
+```bash
+PYTHONPATH=src python3 -m figuresradar discover
+```
+
+Consulta páginas públicas de saldos da Nin-Nin-Game e da HobbyLink Japan, guarda histórico de preços em `data/runtime/price-history.sqlite3` e gera `data/runtime/latest-deals.json`. O diretório runtime está ignorado pelo Git. A saída inclui score, qualidade, stock, URL e motivo do score. Este comando não consulta nem escreve no Buffer; `DRY_RUN=true` e `BUFFER_WRITE_ENABLED=false` continuam os valores por defeito. As [fontes, limites e fórmula](docs/discovery.md) estão documentados em separado.
+
+FiguresRadar prepara posts sobre promoções de anime figures para a conta X `@FiguresRadar`. O Buffer é o único responsável por escolher horários e publicar. **A CLI de prévia funciona apenas em `DRY_RUN=true`; a CLI de descoberta só lê lojas e grava dados locais. Nenhuma delas cria, edita ou apaga posts.**
 
 ## Configuração do Buffer
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .buffer_client import BufferQueueReader, BufferQueueSnapshot
@@ -12,6 +13,10 @@ from .persistence import DealStore
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "discover":
+        from .discovery import main as discover_main
+        sys.argv.pop(1)
+        return discover_main()
     parser = argparse.ArgumentParser(description="Prepare FiguresRadar deals without publishing")
     parser.add_argument("--fixture", type=Path, default=None)
     parser.add_argument("--pending", type=int, default=None, help="Simulated Buffer count; test only")
